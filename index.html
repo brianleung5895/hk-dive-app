@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>HK Dive Forecast</title>
+    
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap');
+        
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f3f4f6; user-select: none; -webkit-tap-highlight-color: transparent; }
+        [v-cloak] { display: none; }
+        
+        /* 手機版面優化 (iOS Safe Area) */
+        #app-container { max-width: 480px; margin: 0 auto; background-color: #ffffff; height: 100dvh; position: relative; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 0 20px rgba(0,0,0,0.05); }
+        #map { height: 100%; width: 100%; z-index: 1; }
+        
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        /* 元件樣式 */
+        .jp-card { background: white; border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.08); border: 1px solid #f3f4f6; }
+        .bottom-nav { position: absolute; bottom: 0; width: 100%; background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); border-top: 1px solid #f0f0f0; display: flex; justify-content: space-around; padding: 10px 0 25px 0; z-index: 1000; }
+        .nav-item { text-align: center; color: #9ca3af; font-size: 10px; transition: all 0.3s; }
+        .nav-item.active { color: #0ea5e9; transform: translateY(-2px); }
+        .nav-item i { font-size: 20px; margin-bottom: 2px; display: block; }
+
+        /* 能見度色彩系統 */
+        .vis-text-blue { color: #2563EB; } .vis-text-green { color: #059669; } .vis-text-yellow { color: #D97706; } .vis-text-red { color: #DC2626; }
+        
+        /* 動畫 */
+        .progress-ring__circle { transition: stroke-dashoffset 0.8s cubic-bezier(0.4, 0, 0.2, 1); transform: rotate(-90deg); transform-origin: 50% 50%; }
+        .tide-wave { animation: wave-move 4s ease-in-out infinite alternate; }
+        @keyframes wave-move { from { transform: translateX(0); } to { transform: translateX(-10px); } }
+        .loading-spin { animation: spin 1s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        
+        /* 轉場效果 */
+        .slide-up-enter-active, .slide-up-leave-active { transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        .slide-up-enter-from, .slide-up-leave-to { transform: translateY(110%); }
+        .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+        .fade-enter-from, .fade-leave-to { opacity: 0; }
+    </style>
+</head>
+<body>
+
+<div id="app" v-cloak>
+    <div id="app-container">
+        
+        <div v-if="isLoading" class="absolute inset-0 z-[2000] bg-white flex flex-col items-center justify-center">
+            <div class="w-10 h-10 border-4 border-gray-200 border-t-sky-500 rounded-full loading-spin mb-4"></div>
+            <div class="text-gray-400 text-xs font-bold tracking-widest">LOADING DATABASE...</div>
+        </div>
+
+        <div v-show="currentTab === 'map'" class="flex-1 relative flex flex-col h-full">
+            <div class="absolute top-4 left-4 right-4 z-[950]">
+                <div class="bg-white/95 backdrop-blur shadow-md rounded-full flex items-center px-4 py-2.5 border border-gray-100">
+                    <i class="fa-solid fa-magnifying-glass text-gray-400 mr-3"></i>
+                    <input v-model.trim="searchQuery" type="text" placeholder="搜尋潛點..." class="flex-1 bg-transparent border-none outline-none text-sm text-gray-700">
+                    <button v-if="searchQuery" @click="searchQuery=''" class="text-gray-300"><i class="fa-solid fa-circle-xmark"></i></button>
+                </div>
+                <transition name="fade">
+                    <div v-if="searchQuery && filteredSites.length > 0" class="mt-2 bg-white/95 backdrop-blur rounded-xl shadow-xl overflow-hidden max-h-60 overflow-y-auto no-scrollbar">
+                        <div v-for="site in filteredSites" :key="site.id" @click="selectSearchResult(site)" class="px-4 py-3 border-b border-gray-50 active:bg-sky-50 flex justify-between items-center">
+                            <span class="text-sm font-medium text-gray-700">{{ site.name }}</span>
+                            <span class="text-xs text-gray-400 bg-gray-100 px-2 rounded-full">{{ site.depth }}m</span>
+                        </div>
+                    </div>
+                </transition>
+            </div>
+
+            <div class="absolute top-20 right-4 z-[900]" v-if="!selectedSite">
+                <div class="bg-white/90 backdrop-blur p-2 rounded-xl shadow-sm border border-gray-100 text-center mb-2 min-w-[60px]">
+                    <div class="text-xl text-sky-500"><i class="fa-solid fa-cloud-sun"></i></div>
+                    <div class="text-xs font-bold text-gray-600 mt-1">{{ weather.temp }}°C</div>
+                </div>
+                <div class="bg-white/90 backdrop-blur rounded-xl p-1 shadow-sm border border-gray-100 flex flex-col space-y-1">
+                    <button v-for="(day, index) in forecastDays" :key="index" @click="changeForecastDate(index)" :class="['w-8 h-8 text-[10px] rounded-lg font-bold flex items-center justify-center transition-all', selectedDateIndex === index ? 'bg-sky-500 text-white shadow' : 'text-gray-400']">{{ day.charAt(0) }}</button>
+                </div>
+            </div>
+
+            <div id="map" class="w-full h-full bg-slate-100"></div>
+
+            <transition name="slide-up">
+                <div v-if="selectedSite" class="absolute bottom-[80px] left-0 right-0 z-[960] p-4 pointer-events-none">
+                    <div class="jp-card p-5 relative overflow-hidden pointer-events-auto">
+                        <button @click="selectedSite=null" class="absolute top-3 right-3 w-8 h-8 bg-gray-50 rounded-full text-gray-400 flex items-center justify-center hover:bg-gray-100 z-10"><i class="fa-solid fa-xmark"></i></button>
+                        <h3 class="font-bold text-xl text-gray-800 mb-1 pr-8 truncate">{{ selectedSite.name }}</h3>
+                        <p class="text-xs text-gray-400 mb-4"><i class="fa-solid fa-location-dot mr-1 text-sky-400"></i> {{ selectedSite.lat.toFixed(3) }}, {{ selectedSite.lng.toFixed(3) }}</p>
+                        
+                        <div class="grid grid-cols-3 gap-3 mb-4">
+                            <div class="col-span-1 flex flex-col items-center justify-center relative">
+                                <svg class="w-20 h-20" viewBox="0 0 100 100">
+                                    <circle class="text-gray-100 stroke-current" stroke-width="8" cx="50" cy="50" r="40" fill="transparent"></circle>
+                                    <circle class="progress-ring__circle stroke-current" :class="currentForecast.colorClass" stroke-width="8" stroke-linecap="round" cx="50" cy="50" r="40" fill="transparent" :stroke-dasharray="251" :stroke-dashoffset="currentForecast.offset"></circle>
+                                </svg>
+                                <div class="absolute inset-0 flex flex-col items-center justify-center"><span class="text-2xl font-bold text-gray-700">{{ currentForecast.vis }}</span><span class="text-[10px] text-gray-400">米</span></div>
+                                <div class="text-[10px] font-bold mt-1 px-2 py-0.5 rounded-full bg-gray-50 text-gray-500">能見度</div>
+                            </div>
+                            <div class="col-span-1 bg-gray-50 rounded-xl p-2 flex flex-col items-center justify-center">
+                                <div class="relative w-12 h-12 mb-1 flex items-center justify-center border-2 border-gray-200 rounded-full bg-white">
+                                    <span class="text-[8px] absolute top-0.5 text-gray-300 font-bold">N</span>
+                                    <i class="fa-solid fa-location-arrow text-xl text-gray-700 transition-transform duration-700" :style="{ transform: `rotate(${weather.windDegree - 45}deg)` }"></i>
+                                </div>
+                                <div class="text-xs font-bold text-gray-700">{{ weather.windDir }}</div>
+                                <div class="text-[10px] text-gray-400">風向</div>
+                            </div>
+                            <div class="col-span-1 flex flex-col space-y-2">
+                                <div class="bg-blue-50 rounded-xl p-2 flex items-center justify-between h-1/2"><i class="fa-solid fa-temperature-half text-blue-400 text-sm"></i><div class="text-right"><div class="text-sm font-bold text-blue-800">{{ weather.temp - 2 }}°</div><div class="text-[8px] text-blue-400">水溫</div></div></div>
+                                <div class="bg-gray-50 rounded-xl p-2 h-1/2 flex flex-col justify-end relative"><div class="absolute bottom-0 left-0 right-0 bg-sky-200 opacity-30" :style="{ height: Math.min(100, (selectedSite.depth / 30 * 100)) + '%' }"></div><div class="text-right relative z-10"><div class="text-sm font-bold text-gray-700">{{ selectedSite.depth }}m</div><div class="text-[8px] text-gray-400">深度</div></div></div>
+                            </div>
+                        </div>
+
+                        <div class="bg-gradient-to-br from-blue-50 to-white rounded-xl p-3 border border-blue-100 relative overflow-hidden mb-3">
+                            <div class="flex justify-between items-center mb-1 relative z-10"><span class="text-xs font-bold text-blue-800"><i class="fa-solid fa-water mr-1"></i>潮汐</span><span class="text-[10px] text-blue-500">下次滿潮: {{ weather.tideTime }}</span></div>
+                            <svg viewBox="0 0 300 60" class="w-full h-8 opacity-80" preserveAspectRatio="none"><path d="M0,40 C50,40 50,10 100,10 C150,10 150,50 200,50 C250,50 250,20 300,20 V60 H0 Z" fill="#93C5FD" class="tide-wave"></path><line x1="120" y1="0" x2="120" y2="60" stroke="#EF4444" stroke-width="1" stroke-dasharray="2 2" opacity="0.5"></line></svg>
+                        </div>
+                        
+                        <button @click="openLogModal(selectedSite)" class="w-full bg-gray-900 text-white py-3 rounded-xl text-sm font-medium shadow-lg active:scale-95 transition-transform">記錄日誌</button>
+                    </div>
+                </div>
+            </transition>
+        </div>
+
+        <div v-show="currentTab === 'log'" class="flex-1 bg-gray-50 p-4 overflow-y-auto pb-24">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4 sticky top-0 bg-gray-50 py-2 z-10">我的日誌</h2>
+            <button @click="openLogModal(null)" class="w-full py-3 bg-sky-500 text-white rounded-xl shadow-lg shadow-sky-200 mb-6 font-medium flex items-center justify-center space-x-2"><i class="fa-solid fa-plus"></i><span>新增記錄</span></button>
+            <div class="space-y-3">
+                <div v-if="logs.length===0" class="text-center py-10 text-gray-400"><i class="fa-solid fa-book-open text-4xl mb-3 opacity-30"></i><p class="text-sm">暫無已審批的記錄</p></div>
+                <div v-for="log in logs" :key="log.id" class="jp-card p-4 flex justify-between items-center">
+                    <div><div class="font-bold text-gray-700">{{ log.site }}</div><div class="text-xs text-gray-400">{{ log.date }}</div></div>
+                    <div class="text-right"><div class="text-sm font-bold" :class="getVisTextColor(log.vis)">{{ log.vis }}m</div><div class="text-xs text-gray-400">能見度</div></div>
+                </div>
+            </div>
+        </div>
+
+        <div v-show="currentTab === 'profile'" class="flex-1 bg-gray-50 p-4">
+            <div class="text-center mt-12 mb-8">
+                <div class="w-20 h-20 bg-white shadow-sm rounded-full mx-auto mb-3 flex items-center justify-center text-3xl text-sky-500 border-2 border-white"><i class="fa-solid fa-user-astronaut"></i></div>
+                <h3 class="font-bold text-lg text-gray-800">Diver User</h3>
+                <p class="text-xs text-gray-400">HKUA Member</p>
+            </div>
+            <div class="bg-white rounded-xl overflow-hidden border border-gray-100 shadow-sm mb-6">
+                <div class="p-4 border-b border-gray-50 flex justify-between items-center" @click="loadData"><span class="text-sm font-medium text-gray-600">重整資料庫</span><i class="fa-solid fa-rotate text-gray-400 text-xs"></i></div>
+                <div class="p-4 flex justify-between items-center active:bg-gray-50" @click="triggerAdminLogin">
+                    <span class="text-sm font-medium text-gray-600">App 版本</span><span class="text-gray-400 text-xs font-mono">v1.6 (Stable)</span>
+                </div>
+            </div>
+
+            <transition name="fade">
+                <div v-if="isAdminMode" class="mt-4">
+                    <div class="text-xs font-bold text-red-500 mb-2 px-1">ADMIN TOOLS</div>
+                    <button @click="showAddSiteModal = true" class="w-full py-3 bg-red-500 text-white rounded-xl shadow-lg shadow-red-200 font-bold flex items-center justify-center space-x-2 mb-4">
+                        <i class="fa-solid fa-map-pin"></i> <span>新增潛點 (Add Site)</span>
+                    </button>
+                    <div class="bg-red-50 border border-red-100 rounded-xl p-4 text-center text-xs text-red-400">
+                        管理員模式已啟動。新增潛點將直接寫入資料庫。
+                    </div>
+                </div>
+            </transition>
+        </div>
+
+        <div v-if="showLogModal" class="fixed inset-0 z-[1000] bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
+            <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl p-6 shadow-2xl animate-slide-up">
+                <div class="flex justify-between items-center mb-4"><h3 class="font-bold text-lg">新增記錄</h3><button @click="showLogModal=false" class="text-gray-400"><i class="fa-solid fa-xmark"></i></button></div>
+                <div class="space-y-4">
+                    <input v-model="newLog.site" type="text" placeholder="潛點名稱" class="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm">
+                    <div class="grid grid-cols-2 gap-4">
+                        <input v-model="newLog.vis" type="number" placeholder="能見度 (m)" class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-center">
+                        <input v-model="newLog.temp" type="number" placeholder="水溫 (°C)" class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-center">
+                    </div>
+                    <button @click="saveLog" class="w-full bg-gray-900 text-white py-3 rounded-xl font-medium shadow-lg">提交</button>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="showAddSiteModal" class="fixed inset-0 z-[1000] bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
+            <div class="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl p-6 shadow-2xl animate-slide-up">
+                <div class="flex justify-between items-center mb-4"><h3 class="font-bold text-lg text-red-600">新增潛點 (Admin)</h3><button @click="showAddSiteModal=false" class="text-gray-400"><i class="fa-solid fa-xmark"></i></button></div>
+                <div class="space-y-4">
+                    <div><label class="text-xs text-gray-500">潛點名稱</label><input v-model="newSite.name" type="text" class="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm font-bold"></div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div><label class="text-xs text-gray-500">緯度 (Lat)</label><input v-model="newSite.lat" type="text" class="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs"></div>
+                        <div><label class="text-xs text-gray-500">經度 (Lng)</label><input v-model="newSite.lng" type="text" class="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs"></div>
+                    </div>
+                    <button @click="getCurrentLocationForSite" class="w-full py-2 border border-sky-500 text-sky-500 rounded-lg text-xs font-bold flex items-center justify-center"><i class="fa-solid fa-location-crosshairs mr-2"></i> 獲取當前 GPS</button>
+                    <button @click="saveNewSite" class="w-full bg-red-600 text-white py-3 rounded-xl font-medium shadow-lg">確認新增</button>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="showAdminLogin" class="fixed inset-0 z-[1100] bg-black/80 flex items-center justify-center">
+            <div class="bg-white w-64 p-4 rounded-xl text-center">
+                <div class="text-sm font-bold mb-3">Admin Access</div>
+                <input v-model="adminPassword" type="password" class="w-full text-center border rounded p-2 mb-3 tracking-widest">
+                <div class="flex space-x-2"><button @click="showAdminLogin=false" class="flex-1 py-2 text-xs">Cancel</button><button @click="verifyAdmin" class="flex-1 py-2 bg-black text-white rounded text-xs">Enter</button></div>
+            </div>
+        </div>
+
+        <nav class="bottom-nav">
+            <div @click="switchTab('map')" :class="['nav-item w-16', currentTab==='map'?'active':'']"><i class="fa-solid fa-map-location-dot"></i><span>地圖</span></div>
+            <div @click="switchTab('log')" :class="['nav-item w-16', currentTab==='log'?'active':'']"><i class="fa-solid fa-book-open"></i><span>日誌</span></div>
+            <div @click="switchTab('profile')" :class="['nav-item w-16', currentTab==='profile'?'active':'']"><i class="fa-solid fa-user-gear"></i><span>我的</span></div>
+        </nav>
+
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    const { createApp, ref, computed, onMounted, nextTick, markRaw } = Vue;
+
+    // 🚨🚨🚨 請務必將此處換成你剛剛部署的 GAS 網址 🚨🚨🚨
+    const API_URL = "https://script.google.com/macros/s/AKfycbxVy_lw6YVRIwG_3_L86ZzAs-iSqLMTQpZIOzCIHRMzz98wrTDt1JTTnA8L4-Q3TUtkXw/exec"; 
+
+    createApp({
+        setup() {
+            // States
+            const currentTab = ref('map');
+            const isLoading = ref(true); // Loading State
+            const selectedDateIndex = ref(0);
+            const forecastDays = ['今天', '明天', '後天'];
+            const selectedSite = ref(null);
+            const searchQuery = ref('');
+            let mapInstance = null;
+            const markers = [];
+            
+            // Data
+            const weather = ref({ temp: 25, tideTime: "14:30", windDir: "東風", windDegree: 90 });
+            const diveSites = ref([]);
+            const logs = ref([]);
+
+            // Forms & Modals
+            const showLogModal = ref(false);
+            const newLog = ref({ site: '', vis: null, temp: null });
+            
+            // Admin Feature
+            const showAdminLogin = ref(false);
+            const adminPassword = ref('');
+            const isAdminMode = ref(false);
+            const adminClickCount = ref(0);
+            const showAddSiteModal = ref(false);
+            const newSite = ref({ name: '', lat: '', lng: '' });
+
+            // 1. Load Data
+            const loadData = async () => {
+                isLoading.value = true;
+                try {
+                    // Load HKO Weather
+                    const hkoRes = await fetch('https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=tc');
+                    const hkoData = await hkoRes.json();
+                    if(hkoData.temperature?.data?.[0]) weather.value.temp = hkoData.temperature.data[0].value;
+
+                    // Load Google Sheet Data
+                    const resS = await fetch(`${API_URL}?action=getSites`);
+                    const sites = await resS.json();
+                    if(Array.isArray(sites)) {
+                        diveSites.value = sites;
+                        updateMarkers();
+                    }
+
+                    const resL = await fetch(`${API_URL}?action=getLogs`);
+                    const logData = await resL.json();
+                    if(Array.isArray(logData)) logs.value = logData;
+
+                } catch(e) { 
+                    console.error("Connection Error", e);
+                    alert("連接資料庫失敗，請檢查網路或 GAS 網址");
+                } finally {
+                    isLoading.value = false;
+                }
+            };
+
+            // 2. Save Log (Action: addLog)
+            const saveLog = async () => {
+                if(!newLog.value.site) return;
+                logs.value.unshift({ id: Date.now(), site: newLog.value.site, date: "上傳中...", vis: newLog.value.vis });
+                showLogModal.value = false;
+                await postToGAS({ action: 'addLog', ...newLog.value });
+                alert("日誌已上傳，等待審核");
+                loadData();
+            };
+
+            // 3. Save New Site (Action: addSite)
+            const saveNewSite = async () => {
+                if(!newSite.value.name || !newSite.value.lat) return alert("請填寫完整");
+                showAddSiteModal.value = false;
+                alert("正在寫入資料庫...");
+                await postToGAS({ 
+                    action: 'addSite', 
+                    name: newSite.value.name, 
+                    lat: newSite.value.lat, 
+                    lng: newSite.value.lng 
+                });
+                alert("新潛點已建立！");
+                newSite.value = { name: '', lat: '', lng: '' };
+                loadData(); // Reload map
+            };
+
+            // Helper: GPS
+            const getCurrentLocationForSite = () => {
+                if("geolocation" in navigator) {
+                    navigator.geolocation.getCurrentPosition(pos => {
+                        newSite.value.lat = pos.coords.latitude.toFixed(6);
+                        newSite.value.lng = pos.coords.longitude.toFixed(6);
+                        alert("GPS 獲取成功！");
+                    }, (err) => alert("GPS 錯誤: " + err.message), { enableHighAccuracy: true });
+                } else alert("無法獲取 GPS");
+            };
+
+            // Helper: POST to GAS
+            const postToGAS = async (data) => {
+                try {
+                    await fetch(API_URL, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                } catch(e) {
+                    alert("上傳失敗");
+                }
+            };
+
+            // Map Logic
+            const initMap = () => {
+                mapInstance = markRaw(L.map('map', { zoomControl: false, attributionControl: false }).setView([22.38, 114.32], 10.5));
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(mapInstance);
+            };
+
+            const updateMarkers = () => {
+                if (!mapInstance) return;
+                markers.forEach(m => m.remove());
+                markers.length = 0;
+                diveSites.value.forEach(site => {
+                    const data = site.forecast[selectedDateIndex.value] || site.forecast[0];
+                    if(!data) return;
+                    const colorMap = { 'blue': '#3B82F6', 'green': '#10B981', 'yellow': '#F59E0B', 'red': '#EF4444' };
+                    const marker = L.circleMarker([site.lat, site.lng], { radius: 8, fillColor: colorMap[data.color]||'#ccc', color: "#fff", weight: 2, opacity: 1, fillOpacity: 0.9 }).addTo(mapInstance);
+                    marker.on('click', () => { selectedSite.value = site; mapInstance.flyTo([site.lat, site.lng], 13, { duration: 1 }); });
+                    markers.push(marker);
+                });
+            };
+
+            // Computeds & Helpers
+            const filteredSites = computed(() => searchQuery.value ? diveSites.value.filter(s => s.name.includes(searchQuery.value)) : []);
+            const currentForecast = computed(() => {
+                if (!selectedSite.value) return { vis: 0, colorClass: '', offset: 251 };
+                const data = selectedSite.value.forecast[selectedDateIndex.value] || selectedSite.value.forecast[0];
+                return { vis: data.vis, colorClass: `vis-text-${data.color}`, offset: 251 - (Math.min(data.vis, 30)/30)*251 };
+            });
+            
+            const triggerAdminLogin = () => { adminClickCount.value++; if(adminClickCount.value >= 5 && !isAdminMode.value) showAdminLogin.value = true; adminClickCount.value = 0; };
+            const verifyAdmin = () => { if(adminPassword.value==='5895'){ isAdminMode.value=true; showAdminLogin.value=false; } else alert("Error"); };
+            const openLogModal = (s) => { newLog.value.site = s?.name||''; showLogModal.value=true; };
+            const switchTab = (t) => { currentTab.value=t; if(t==='map') nextTick(()=>mapInstance?.invalidateSize()); };
+            const getVisTextColor = (v) => v>=15?'text-blue-500':v>=8?'text-green-500':v>=3?'text-yellow-500':'text-red-500';
+
+            onMounted(() => { initMap(); loadData(); });
+
+            return {
+                currentTab, switchTab, isLoading, selectedDateIndex, forecastDays, changeForecastDate: (i)=>{selectedDateIndex.value=i;updateMarkers()},
+                weather, diveSites, logs, selectedSite, searchQuery, filteredSites, currentForecast, selectSearchResult: (s)=>{searchQuery.value='';selectedSite.value=s;mapInstance.flyTo([s.lat,s.lng],14)},
+                showLogModal, openLogModal, newLog, saveLog, getVisTextColor, loadData,
+                triggerAdminLogin, showAdminLogin, adminPassword, verifyAdmin, isAdminMode,
+                showAddSiteModal, newSite, saveNewSite, getCurrentLocationForSite
+            };
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
